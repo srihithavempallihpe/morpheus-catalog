@@ -1,0 +1,104 @@
+#!/bin/bash
+#set -euo pipefail
+
+# ===== Read input from Morpheus =====
+read -r -d '' JSON_INPUT <<EOF
+{
+    "NODES_INPUT": "<%=customOptions.nodes%>",
+    "corporate_ntp": "<%=customOptions.corporate_ntp%>",
+    "admin_host_ip" : "<%=customOptions.admin_host_ip%>",
+    "admin_host_user" : "<%=customOptions.admin_host_user%>",
+    "admin_host_pass" : "<%=customOptions.admin_host_pass%>"
+}
+EOF
+
+# ===== Extract variables =====
+NODES_INPUT=$(echo "$JSON_INPUT" | jq -r '.NODES_INPUT')
+corporate_ntp=$(echo "$JSON_INPUT" | jq -r '.corporate_ntp')
+admin_host_ip=$(echo "$JSON_INPUT" | jq -r '.admin_host_ip')
+admin_host_user=$(echo "$JSON_INPUT" | jq -r '.admin_host_user')
+admin_host_pass=$(echo "$JSON_INPUT" | jq -r '.admin_host_pass')
+
+# ===== Validate and extract IP-host map using Python =====
+HOST_IP_JSON=$(python3 - <<EOF
+import re, json, sys
+
+input_str = """$NODES_INPUT"""
+ips = re.findall(r'value:([\d.]+)', input_str)
+hosts = re.findall(r'key:([\w.-]+)', input_str)
+
+if len(ips) != len(hosts):
+    print("")
+    sys.exit(1)
+if len(set(ips)) != len(ips) or len(set(hosts)) != len(hosts):
+    print("")
+    sys.exit(1)
+
+host_ip_map = [{"Hostname": h, "Host_IP": i} for h, i in zip(hosts, ips)]
+print(json.dumps(host_ip_map))
+EOF
+)
+
+# ===== Exit if validation failed =====
+if [[ -z "$HOST_IP_JSON" ]]; then
+    echo "❌ Validation failed: mismatch or duplicate in hosts/IPs"
+    exit 1
+fi
+
+echo "✅ Host/IP list validated."
+
+# ===== Configure NTP on each node =====
+echo "=== Configuring NTP on all nodes ==="
+
+for row in $(echo "$HOST_IP_JSON" | jq -r '.[] | @base64'); do
+    _jq() { echo "$row" | base64 --decode | jq -r "$1"; }
+    HOST=$(_jq '.Hostname')
+    IP=$(_jq '.Host_IP')
+
+    echo "🔹 Setting NTP on $HOST ($IP)..."
+    sshpass -p "$admin_host_pass" ssh \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null \
+        ${admin_host_user}@${IP} bash -s <<EOC
+        set -e
+        if command -v chronyd >/dev/null 2>&1; then
+            systemctl stop chronyd || true
+            sed -i '/^server /d' /etc/chrony.conf
+            echo "server $corporate_ntp iburst" >> /etc/chrony.conf
+            systemctl enable chronyd --now
+        elif command -v ntpd >/dev/null 2>&1; then
+            systemctl stop ntpd || true
+            sed -i '/^server /d' /etc/ntp.conf
+            echo "server $corporate_ntp iburst" >> /etc/ntp.conf
+            systemctl enable ntpd --now
+        else
+            echo "❌ No NTP service (chronyd/ntpd) found on $HOST"
+            exit 1
+        fi
+EOC
+    echo "✅ NTP configured on $HOST ($IP)"
+done
+
+# ===== Verify NTP sync =====
+echo -e "\n=== Verifying NTP sync ==="
+for row in $(echo "$HOST_IP_JSON" | jq -r '.[] | @base64'); do
+    _jq() { echo "$row" | base64 --decode | jq -r "$1"; }
+    HOST=$(_jq '.Hostname')
+    IP=$(_jq '.Host_IP')
+
+    echo "🔹 Checking $HOST ($IP)..."
+    sshpass -p "$admin_host_pass" ssh \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null \
+        ${admin_host_user}@${IP} "
+            if command -v chronyc >/dev/null 2>&1; then
+                chronyc -a makestep >/dev/null 2>&1
+                sleep 3
+                chronyc tracking && chronyc sources -v
+            elif command -v ntpq >/dev/null 2>&1; then
+                ntpq -p
+            else
+                echo 'NTP check failed'
+            fi
+        "
+done
+
+echo -e "\n🎉 NTP setup completed on all nodes."
