@@ -1,0 +1,12 @@
+{
+    "NODES_INPUT": "[[value:20.20.20.186, key:ceph04.isv.local], [value:20.20.20.184, key:ceph05.isv.local]]",
+    "corporate_ntp": "16.110.135.123",
+    "solution_network_ip": "20.20.20.0",
+    "ceph_adminuser": "deploy",
+    "ceph_adminuser_password": "",
+    "rhsub_username": "eaj@hpe.com",
+    "rhsub_password": "",
+    "admin_host_ip" : "20.20.20.181",
+    "admin_host_user" : "root",
+    "admin_host_pass" : ""
+}
