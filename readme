@@ -1,2 +1,6 @@
 workflow
 
+add-multi-ceph-hosts-ssh
+add_multi_ceph_nodes
+add_multi_ceph_ntp
+
